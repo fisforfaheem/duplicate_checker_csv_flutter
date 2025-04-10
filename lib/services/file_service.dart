@@ -406,6 +406,13 @@ class FileService {
         details: {'startTime': DateTime.now().toIso8601String()},
       );
 
+      // Check if comparison file is empty or only contains whitespace
+      if (comparisonFileContent.trim().isEmpty) {
+        throw Exception(
+          'The uploaded file is empty. Please upload a file with content to compare.',
+        );
+      }
+
       final masterFiles = await getMasterFiles(onProgress);
       if (masterFiles.isEmpty) {
         throw Exception('No master files found in $masterFilesDirectory');
@@ -570,6 +577,18 @@ class FileService {
         );
       }
 
+      // Check if any actual valid content was processed
+      bool noValidContent =
+          (results['duplicates'] as List).isEmpty &&
+          (results['unique'] as List).isEmpty &&
+          (results['invalidNumbers'] as List).isEmpty;
+
+      if (noValidContent && comparisonLines.length <= 1) {
+        throw Exception(
+          'The uploaded file contains no valid content to compare. Please check the file format.',
+        );
+      }
+
       stopwatch.stop();
       final stats = {
         'totalProcessed': totalLines - 1,
@@ -600,18 +619,32 @@ class FileService {
   }
 
   /// Downloads a file with the given content in Excel-friendly CSV format
-  Future<void> downloadFile(String content, String fileName) async {
+  /// Returns the file path where the file was saved (null for web)
+  /// If plainFormat is true, no header or BOM will be added (just raw content)
+  Future<String?> downloadFile(
+    String content,
+    String fileName, {
+    bool plainFormat = false,
+  }) async {
     if (!fileName.toLowerCase().endsWith('.csv')) {
       fileName = '$fileName.csv';
     }
 
-    // Add BOM for Excel UTF-8 compatibility
-    final bom = [0xEF, 0xBB, 0xBF];
-    final headerRow = 'Phone Number,State,Source\n';
-    final contentWithHeader = String.fromCharCodes(bom) + headerRow + content;
+    final List<int> bytes;
+
+    if (plainFormat) {
+      // No header, no BOM - just plain text content
+      bytes = utf8.encode(content);
+    } else {
+      // Add BOM for Excel UTF-8 compatibility
+      final bom = [0xEF, 0xBB, 0xBF];
+      final headerRow = 'Phone Number,State,Source\n';
+      final contentWithHeader = String.fromCharCodes(bom) + headerRow + content;
+      bytes = utf8.encode(contentWithHeader);
+    }
 
     if (kIsWeb) {
-      final bytes = contentWithHeader.codeUnits;
+      // Web platform: Use browser download
       final blob = html.Blob([bytes], 'text/csv;charset=utf-8');
       final url = html.Url.createObjectUrlFromBlob(blob);
       final anchor =
@@ -619,13 +652,57 @@ class FileService {
             ..setAttribute('download', fileName)
             ..click();
       html.Url.revokeObjectUrl(url);
+      return null; // No path to return for web
     } else {
-      final directory = await getDownloadsDirectory();
-      if (directory == null) {
-        throw Exception('Could not access downloads directory');
+      // Desktop platforms: Use file_picker or path_provider
+      try {
+        if (Platform.isWindows) {
+          // On Windows, use the temporary directory and then show the file
+          final tempDir = await getTemporaryDirectory();
+          final tempFilePath = path.join(tempDir.path, fileName);
+          final tempFile = File(tempFilePath);
+          await tempFile.writeAsBytes(bytes);
+          print('File saved temporarily to: $tempFilePath');
+
+          // Open the file explorer to the temp file
+          await Process.run('explorer.exe', ['/select,', tempFilePath]);
+
+          // Return the temp file path
+          return tempFilePath;
+        } else {
+          // For other platforms, try downloads directory first
+          Directory? directory = await getDownloadsDirectory();
+
+          // If downloads directory isn't available, try documents directory
+          directory ??= await getApplicationDocumentsDirectory();
+
+          // If documents directory isn't available, use temporary directory as last resort
+          directory ??= await getTemporaryDirectory();
+
+          final filePath = path.join(directory.path, fileName);
+          final file = File(filePath);
+          await file.writeAsBytes(bytes);
+          print('File saved successfully to: $filePath');
+
+          return filePath;
+        }
+      } catch (e) {
+        print('Error during file save: $e');
+        // Detailed error message for debugging
+        if (e.toString().contains('Permission denied')) {
+          throw Exception(
+            'Permission denied when saving file. Try running the application with administrator privileges.',
+          );
+        } else if (e.toString().contains('No such file or directory')) {
+          throw Exception(
+            'Unable to access the save location. The directory may not exist.',
+          );
+        } else {
+          throw Exception(
+            'Could not save file: $e. Please try selecting a different location.',
+          );
+        }
       }
-      final file = File(path.join(directory.path, fileName));
-      await file.writeAsBytes(bom + contentWithHeader.codeUnits);
     }
   }
 
@@ -637,6 +714,18 @@ class FileService {
             return '${entry['number']},${entry['state']},${entry['source']}';
           }
           return '$entry,,';
+        })
+        .join('\n');
+  }
+
+  /// Formats the results as plain numbers only (one per line, no commas or headers)
+  String formatResultsPlainNumbers(List<dynamic> entries) {
+    return entries
+        .map((entry) {
+          if (entry is Map<String, String>) {
+            return entry['number'];
+          }
+          return entry.toString();
         })
         .join('\n');
   }

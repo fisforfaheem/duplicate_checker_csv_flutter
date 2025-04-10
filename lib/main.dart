@@ -247,6 +247,21 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
         },
       );
 
+      // Check if we have meaningful results to display
+      bool hasContent =
+          (results['stats']['duplicatesFound'] as int) > 0 ||
+          (results['stats']['uniqueFound'] as int) > 0 ||
+          (results['stats']['invalidNumbers'] as int) > 0;
+
+      if (!hasContent) {
+        setState(() {
+          errorMessage =
+              'The uploaded file contains no valid phone numbers to process. Please check your file content.';
+          isLoading = false;
+        });
+        return;
+      }
+
       setState(() {
         comparisonResults = results;
         showResults = true;
@@ -254,7 +269,18 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
       });
     } catch (e) {
       setState(() {
-        errorMessage = 'Error comparing files: $e';
+        // Extract more user-friendly error message
+        String errorMsg = e.toString();
+        if (errorMsg.contains('Exception: Error comparing files: Exception:')) {
+          errorMsg =
+              errorMsg
+                  .replaceAll(
+                    'Exception: Error comparing files: Exception:',
+                    '',
+                  )
+                  .trim();
+        }
+        errorMessage = errorMsg;
         isLoading = false;
       });
     }
@@ -264,18 +290,54 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
     if (comparisonResults == null) return;
 
     try {
-      final content = _fileService.formatResults(
-        type == 'duplicates'
-            ? comparisonResults!['duplicates']!
-            : comparisonResults!['unique']!,
-      );
+      // Format the results based on the selected type (duplicates or unique)
+      final data =
+          type == 'duplicates'
+              ? comparisonResults!['duplicates']!
+              : comparisonResults!['unique']!;
 
-      await _fileService.downloadFile(
+      // Use plain number format (no commas, no headers)
+      final content = _fileService.formatResultsPlainNumbers(data);
+
+      // Download the file with plain format
+      final saveLocation = await _fileService.downloadFile(
         content,
         '${type}_results', // .csv extension will be added by FileService
+        plainFormat: true,
       );
+
+      // Show success message with save location
+      if (saveLocation != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('File saved to: $saveLocation'),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'OK',
+              onPressed: () {
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              },
+            ),
+          ),
+        );
+      } else {
+        // Generic success for web platform
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('File downloaded successfully'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     } catch (e) {
       setState(() => errorMessage = 'Error downloading results: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red.shade700,
+          duration: const Duration(seconds: 5),
+        ),
+      );
     }
   }
 
@@ -1853,6 +1915,14 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
             as Map<String, List<dynamic>>;
     final totalDuplicates =
         comparisonResults!['stats']['duplicatesFound'] as int;
+
+    // Check if we have any duplicates to avoid division by zero
+    if (totalDuplicates <= 0) {
+      return [
+        const Center(child: Text("No duplicate distribution data available")),
+      ];
+    }
+
     final sortedEntries =
         duplicatesPerFile.entries.toList()
           ..sort((a, b) => b.value.length.compareTo(a.value.length));
@@ -1860,6 +1930,13 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
     return sortedEntries.map((entry) {
       final percentage = (entry.value.length / totalDuplicates * 100)
           .toStringAsFixed(1);
+
+      // Calculate widthFactor safely, ensuring it's between 0.0 and 1.0
+      final double widthFactor =
+          totalDuplicates > 0
+              ? (entry.value.length / totalDuplicates).clamp(0.0, 1.0)
+              : 0.0;
+
       return Padding(
         padding: const EdgeInsets.only(bottom: 16),
         child: Column(
@@ -1922,7 +1999,7 @@ class _FileComparisonScreenState extends State<FileComparisonScreen>
                   ),
                 ),
                 FractionallySizedBox(
-                  widthFactor: entry.value.length / totalDuplicates,
+                  widthFactor: widthFactor,
                   child: Container(
                     height: 8,
                     decoration: BoxDecoration(
